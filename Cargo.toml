@@ -9,3 +9,4 @@ edition = "2021"
 descent = {git="https://github.com/apexys/descent"}
 rand = "0.8"
 bytemuck = "1.7"
+image = "0.24.4"
