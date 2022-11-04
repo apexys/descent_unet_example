@@ -1,7 +1,7 @@
 #![feature(int_roundings)]
 use descent::{module::*, prelude::*, optimizer::*, module::ModuleExt};
 use rand::{thread_rng, RngCore, Rng};
-use std::io::Write;
+use std::{io::Write, collections::HashMap};
 
 //Unet definition, recursively holds all the conv layers
 pub struct UNet {
@@ -69,7 +69,7 @@ impl Module for UNet {
 fn main() {
     let mut rng = thread_rng();
     let mut env = Environment::new();
-    let unet = UNet::new(&mut env, 1,1,1,1,3);
+    let unet = UNet::new(&mut env, 1,1,0,8,3);
 
     //Define batch size
     let batch_size = 8;
@@ -109,7 +109,7 @@ fn main() {
             &mut env,
             &scope,
             &parameters,
-            0.1,
+            0.001,
             0.9,
             0.99,
             1.0E-8
@@ -122,7 +122,6 @@ fn main() {
     for param in parameters.iter(){
         env.reset_parameter(param, &mut rng);
     }
-    env.writer(&loss_param).zero_fill();
 
     //Create some data
     let mut xs = Vec::new();
@@ -139,19 +138,79 @@ fn main() {
     }
 
     //Upload data
-    eprintln!("X wants {} values, gets {}", x_param.shape().iter().product::<usize>(), xs.len());
-    let mut x_writer = env.writer(&x_param);
-    x_writer.write_all(bytemuck::cast_slice(&xs)).unwrap();
-    drop(x_writer);
-    eprintln!("Y wants {} values, gets {}", y_param.shape().iter().product::<usize>(), ys.len());
-    let mut y_writer = env.writer(&y_param);
-    y_writer.write_all(bytemuck::cast_slice(&ys)).unwrap();
-    drop(y_writer);
+    for i in 0 .. 100{
+        //Reset loss
+        env.writer(&loss_param).zero_fill();
+        //eprintln!("X wants {} values, gets {}", x_param.shape().iter().product::<usize>(), xs.len());
+        let mut x_writer = env.writer(&x_param);
+        x_writer.write_all(bytemuck::cast_slice(&xs)).unwrap();
+        drop(x_writer);
+        //eprintln!("Y wants {} values, gets {}", y_param.shape().iter().product::<usize>(), ys.len());
+        let mut y_writer = env.writer(&y_param);
+        y_writer.write_all(bytemuck::cast_slice(&ys)).unwrap();
+        drop(y_writer);
 
-    //Run graph
-    env.run(&train_graph, rng.next_u32());
-    //Get and print loss
-    let train_loss = env.read_parameter_scalar(&loss_param) / batch_size as f32;
-    eprintln!("Training loss: {}", train_loss);
+        //Run graph
+        env.run(&train_graph, rng.next_u32());
+        //Get and print loss
+        let train_loss = env.read_parameter_scalar(&loss_param) / batch_size as f32;
+        eprintln!("Epoch {} Training loss: {}", i, train_loss);
+    }
+
+    let mut serialized_parameters = HashMap::new();
+    for (index, param) in parameters.iter().enumerate(){
+        if param.is_trainable(){
+            let value = env.read_parameter_to_vec(param);
+            let name = param.name();
+            eprintln!("Index {} Name {} => Shape {:?}, Value ({} floats)", index, param.name(), param.shape(), value.len());
+            serialized_parameters.insert((index, name), (param.shape(), value));
+        }
+    }
+
+    //Create execution graph
+    //See https://git.geomar.de/valentin-buck/geofeaturesegmentation/-/blob/59a20d3ae5fbb6382c8e269db503849251694bd8/geofeaturesegmentation/src/network.rs for actually doing this
+    let execution_graph= env.build_graph(|scope| {
+        let x = unet.test(scope.parameter(&x_param));
+        scope.write_parameter_value(&y_param, x.value())
+    });
+    eprintln!("Execution graph created");
+
+    eprintln!("Execution before serialization");
+    let mut x_writer = env.writer(&x_param);
+        x_writer.write_all(bytemuck::cast_slice(&xs)).unwrap();
+        drop(x_writer);
+    env.run(&execution_graph, rng.next_u32());
+    let output = env.read_parameter_to_vec(&y_param);
+
+    let unet2 = UNet::new(&mut env, 1,1,0,8,3);
+    let (unet2_execution_graph, unet2_parameters) = {
+        let scope = env.scope();
+        let x = unet2.test(scope.parameter(&x_param));
+        scope.write_parameter_value(&y_param, x.value());
+        let parameters = scope.trainable_parameters();
+        (scope.build_graph(), parameters)
+    };
+
+    for (index, param) in unet2_parameters.iter().enumerate(){
+        let name = param.name();
+        let key = (index, name);
+        if let Some((shape, value)) = serialized_parameters.get(&key){
+            assert_eq!(shape.to_vec(), param.shape().to_vec());
+            let mut writer = env.writer(param);
+            writer.write_all(bytemuck::cast_slice(value)).unwrap();
+            eprintln!("Uploaded {:?}", key);
+        }else{
+            eprintln!("Parameter not found for key {:?}", key);
+        }
+    }
+
+    eprintln!("Execution after serialization");
+    let mut x_writer = env.writer(&x_param);
+        x_writer.write_all(bytemuck::cast_slice(&xs)).unwrap();
+        drop(x_writer);
+    env.run(&unet2_execution_graph, rng.next_u32());
+    let unet2_output = env.read_parameter_to_vec(&y_param);
+
+    assert_eq!(output, unet2_output);
 
 }

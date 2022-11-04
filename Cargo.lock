@@ -44,7 +44,7 @@ dependencies = [
 [[package]]
 name = "descent"
 version = "0.1.0"
-source = "git+https://github.com/apexys/descent#61415476ffaeda734b841e11b533092691c569b4"
+source = "git+https://github.com/apexys/descent#6ee7804bf22b5472ef1eec7acdcf3a8def76063f"
 dependencies = [
  "arrayvec",
  "bytemuck",
